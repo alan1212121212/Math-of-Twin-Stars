@@ -1,14 +1,21 @@
 // MadraCalculatorLayout.tsx
-// Drop this into any React app (Next.js or Vite). No dependencies.
-// It’s just the UI + a stub “simulate()” you’ll replace later.
 "use client";
 
 import React, { useMemo, useState } from "react";
+
+const selectStyle: React.CSSProperties = {
+  backgroundColor: "#0b0b0b",
+  color: "#f9fafb",
+  border: "1px solid #374151",
+  borderRadius: 10,
+  padding: 10,
+};
 
 type Direction = "Inward" | "Balanced" | "Outward";
 type Context = "Resting" | "Moving" | "Fighting";
 type EnvMode = "Preset (Books)" | "Custom";
 
+// Aura that exists in the environment
 type AuraType =
   | "Fire"
   | "Water"
@@ -22,10 +29,13 @@ type AuraType =
   | "Destruction"
   | "Death";
 
+// Madra that can exist in a core (includes Pure madra, but Pure aura does not exist)
+type MadraType = AuraType | "Pure";
+
 type PathPreset = {
   id: string;
   name: string;
-  coreTypes: AuraType[];
+  coreTypes: MadraType[];
 };
 
 type EnvPreset = {
@@ -89,11 +99,19 @@ function normalizeComposition(comp: Record<string, number>) {
   return out;
 }
 
-// Simple compatibility score: sum of env weights for your path’s types.
-// (You can replace with dot product / cosine similarity later.)
-function computeMatchScore(envComp: Partial<Record<AuraType, number>>, coreTypes: AuraType[]) {
+// Compatibility score: sum of environment aura weights matching the path's non-Pure types,
+// plus a small baseline for Pure madra (since Pure aura does not exist).
+function computeMatchScore(
+  envComp: Partial<Record<AuraType, number>>,
+  coreTypes: MadraType[]
+) {
   let score = 0;
-  for (const t of coreTypes) score += envComp[t] ?? 0;
+
+  for (const t of coreTypes) {
+    if (t === "Pure") score += 0.05; // neutral baseline, never "perfect"
+    else score += envComp[t] ?? 0;
+  }
+
   return clamp01(score);
 }
 
@@ -107,7 +125,8 @@ function format1(x: number) {
 
 type SimPoint = { t: number; reserve: number; capacity: number; strain: number };
 
-function simulateStub(args: {
+// v0.1: reserve-only dynamics (capacity fixed). Strain is kept as a placeholder output = 0.
+function simulate(args: {
   durationMin: number;
   dtMin: number;
   initialReservePct: number;
@@ -118,10 +137,6 @@ function simulateStub(args: {
   match: number; // 0..1
   context: Context;
 }): SimPoint[] {
-  // This is NOT “the model” yet.
-  // It’s just a placeholder to prove the UI works.
-  // Replace this entire function with your real time-stepping later.
-
   const {
     durationMin,
     dtMin,
@@ -135,49 +150,61 @@ function simulateStub(args: {
   } = args;
 
   let t = 0;
-  let K = Math.max(1, initialCapacity);
-  let M = clamp01(initialReservePct) * K;
-  let D = 0;
+  const K = Math.max(1, initialCapacity);
+  let M = Math.max(0, Math.min(K, clamp01(initialReservePct) * K));
+  const D = 0;
 
-  // crude knobs so curves move
-  const dirIn = direction === "Inward" ? 1 : direction === "Balanced" ? 0.6 : 0.35;
-  const dirOut = direction === "Outward" ? 1 : direction === "Balanced" ? 0.5 : 0.1;
+  // --- tunable constants (arb units/min) ---
+  const BASE_INTAKE = 10;
+  const LOSS_RATE = 0.01;
 
-  const contextUptime = context === "Resting" ? 1 : context === "Moving" ? 0.7 : 0.45;
-  const easeUptime = 0.35 + 0.65 * ease; // easy -> higher uptime
+  // Direction multiplier (reserve-focused cycling)
+  const dirMult =
+    direction === "Inward" ? 1.0 :
+    direction === "Balanced" ? 0.7 :
+    0.4;
+
+  // Context multiplier (how much you can actually cycle)
+  const contextUptime =
+    context === "Resting" ? 1.0 :
+    context === "Moving" ? 0.7 :
+    0.45;
+
+  // Ease: easy = higher uptime, lower ceiling
+  const e = clamp01(ease);
+  const easeUptime = 0.35 + 0.65 * e;
   const uptime = clamp01(contextUptime * easeUptime);
 
-  const I0 = 8; // base intake scale (arb units/min)
-  const intakeCeiling = I0 * density * (1 - 0.7 * ease); // easy -> lower ceiling
-  const matchEff = 0.15 + 0.85 * match; // mismatch still nonzero
+  const matchEff = 0.15 + 0.85 * clamp01(match);
+  const easeCeilingMult = 1 - 0.7 * e;
+
+  const ceiling =
+    BASE_INTAKE *
+    clamp01(density) *
+    matchEff *
+    dirMult *
+    easeCeilingMult;
 
   const points: SimPoint[] = [];
 
   while (t <= durationMin + 1e-9) {
     points.push({ t, reserve: M, capacity: K, strain: D });
 
-    // placeholder dynamics
-    const rawIntake = uptake(intakeCeiling, M, K, matchEff) * uptime;
+    const fullness = K > 0 ? M / K : 0;
 
-    const dMdt = rawIntake * dirIn - 0.01 * M - 0.03 * D * (M / K);
-    const dKdt = 0.02 * rawIntake * dirOut * (1 - ease) * (1 - K / (K + 500)); // asymptotic-ish
-    const dDdt = 0.04 * rawIntake * (1 - ease) + 0.02 * (1 - match) * rawIntake - 0.06 * D;
+    // Regen slows near full
+    const regen = uptime * ceiling * Math.max(0, 1 - fullness);
+
+    // Passive loss so it doesn't asymptote to exactly K
+    const loss = LOSS_RATE * M;
+
+    const dMdt = regen - loss;
 
     M = Math.max(0, Math.min(K, M + dMdt * dtMin));
-    K = Math.max(1, K + dKdt * dtMin);
-    D = Math.max(0, D + dDdt * dtMin);
-
     t += dtMin;
   }
 
   return points;
-
-  function uptake(ceiling: number, m: number, k: number, eff: number) {
-    // slows down as you approach full
-    const fullness = k > 0 ? m / k : 0;
-    const sat = Math.max(0, 1 - fullness);
-    return Math.max(0, ceiling * eff * sat);
-  }
 }
 
 function SimpleSparkline({
@@ -208,7 +235,7 @@ function SimpleSparkline({
     .join(" ");
 
   return (
-    <div style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 12 }}>
+    <div style={{ border: "1px solid #1f2937", borderRadius: 12, padding: 12, background: "#0b0b0b" }}>
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
         <div style={{ fontWeight: 650 }}>{label}</div>
         <div style={{ opacity: 0.7, fontSize: 12 }}>
@@ -248,21 +275,19 @@ export default function MadraCalculatorLayout() {
   const path = useMemo(() => PATHS.find((p) => p.id === pathId) ?? PATHS[0], [pathId]);
 
   const [initialReservePct, setInitialReservePct] = useState(0.35);
-  const [initialCapacity, setInitialCapacity] = useState(100); // arb units
+  const [initialCapacity, setInitialCapacity] = useState(100);
 
   const [direction, setDirection] = useState<Direction>("Inward");
-  const [ease, setEase] = useState(0.6); // 0..1 easy
+  const [ease, setEase] = useState(0.6);
   const [context, setContext] = useState<Context>("Resting");
 
   // Environment
   const [envMode, setEnvMode] = useState<EnvMode>("Preset (Books)");
   const [envId, setEnvId] = useState(ENVS[0].id);
-
   const envPreset = useMemo(() => ENVS.find((e) => e.id === envId) ?? ENVS[0], [envId]);
 
   const [customDensity, setCustomDensity] = useState(0.5);
   const [customComp, setCustomComp] = useState<Record<AuraType, number>>(() => {
-    // default: evenly spread across a few
     const base: Record<AuraType, number> = Object.fromEntries(AURA_TYPES.map((t) => [t, 0])) as any;
     base.Earth = 0.3;
     base.Wind = 0.25;
@@ -292,7 +317,7 @@ export default function MadraCalculatorLayout() {
   );
 
   const sim = useMemo(() => {
-    return simulateStub({
+    return simulate({
       durationMin,
       dtMin,
       initialReservePct,
@@ -323,12 +348,20 @@ export default function MadraCalculatorLayout() {
   const fullness = final.capacity > 0 ? final.reserve / final.capacity : 0;
 
   return (
-    <div style={{ fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial", padding: 18 }}>
+    <div
+      style={{
+        fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial",
+        padding: 18,
+        backgroundColor: "#050505",
+        color: "#f9fafb",
+        minHeight: "100vh",
+      }}
+    >
       <div style={{ maxWidth: 1100, margin: "0 auto", display: "flex", flexDirection: "column", gap: 14 }}>
         <header style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
           <div>
             <div style={{ fontSize: 22, fontWeight: 800 }}>Math of Twin Stars</div>
-            <div style={{ opacity: 0.7, fontSize: 13 }}>Calculator layout (UI + stub sim). Replace the stub with your real model.</div>
+            <div style={{ opacity: 0.7, fontSize: 13 }}>Calculator layout + v0.1 reserve model (Pure madra, no Pure aura).</div>
           </div>
           <div style={{ fontSize: 12, opacity: 0.8, textAlign: "right" }}>
             Environment match: <b>{formatPct(match)}</b> · Aura density: <b>{formatPct(effectiveEnv.density)}</b>
@@ -337,11 +370,11 @@ export default function MadraCalculatorLayout() {
 
         <div style={{ display: "grid", gridTemplateColumns: "360px 1fr", gap: 14, alignItems: "start" }}>
           {/* Controls */}
-          <div style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 14, display: "flex", flexDirection: "column", gap: 14 }}>
+          <div style={{ border: "1px solid #1f2937", borderRadius: 12, padding: 14, display: "flex", flexDirection: "column", gap: 14, background: "#0b0b0b" }}>
             <div style={{ fontWeight: 750, marginBottom: 2 }}>Inputs</div>
 
             <Field label="Path" hint="Core types determine environment match">
-              <select value={pathId} onChange={(e) => setPathId(e.target.value)} style={{ padding: 10, borderRadius: 10, border: "1px solid #d1d5db" }}>
+              <select value={pathId} onChange={(e) => setPathId(e.target.value)} style={selectStyle}>
                 {PATHS.map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.name}
@@ -361,6 +394,7 @@ export default function MadraCalculatorLayout() {
                 step={0.01}
                 value={initialReservePct}
                 onChange={(e) => setInitialReservePct(Number(e.target.value))}
+                style={{ accentColor: "#9ca3af" }}
               />
             </Field>
 
@@ -372,13 +406,14 @@ export default function MadraCalculatorLayout() {
                 step={5}
                 value={initialCapacity}
                 onChange={(e) => setInitialCapacity(Number(e.target.value))}
+                style={{ accentColor: "#9ca3af" }}
               />
             </Field>
 
-            <hr style={{ border: "none", borderTop: "1px solid #e5e7eb" }} />
+            <hr style={{ border: "none", borderTop: "1px solid #1f2937" }} />
 
-            <Field label="Directional cycling" hint="Inward = reserve, Outward = capacity">
-              <select value={direction} onChange={(e) => setDirection(e.target.value as Direction)} style={{ padding: 10, borderRadius: 10, border: "1px solid #d1d5db" }}>
+            <Field label="Directional cycling" hint="Inward = reserve-focused, Outward = low reserve regen">
+              <select value={direction} onChange={(e) => setDirection(e.target.value as Direction)} style={selectStyle}>
                 {(["Inward", "Balanced", "Outward"] as Direction[]).map((d) => (
                   <option key={d} value={d}>
                     {d}
@@ -388,11 +423,19 @@ export default function MadraCalculatorLayout() {
             </Field>
 
             <Field label="Ease" hint={`Easy: ${formatPct(ease)} (easy => lower ceiling, higher uptime)`}>
-              <input type="range" min={0} max={1} step={0.01} value={ease} onChange={(e) => setEase(Number(e.target.value))} />
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.01}
+                value={ease}
+                onChange={(e) => setEase(Number(e.target.value))}
+                style={{ accentColor: "#9ca3af" }}
+              />
             </Field>
 
             <Field label="Context" hint="Affects uptime">
-              <select value={context} onChange={(e) => setContext(e.target.value as Context)} style={{ padding: 10, borderRadius: 10, border: "1px solid #d1d5db" }}>
+              <select value={context} onChange={(e) => setContext(e.target.value as Context)} style={selectStyle}>
                 {(["Resting", "Moving", "Fighting"] as Context[]).map((c) => (
                   <option key={c} value={c}>
                     {c}
@@ -401,10 +444,10 @@ export default function MadraCalculatorLayout() {
               </select>
             </Field>
 
-            <hr style={{ border: "none", borderTop: "1px solid #e5e7eb" }} />
+            <hr style={{ border: "none", borderTop: "1px solid #1f2937" }} />
 
             <Field label="Environment mode">
-              <select value={envMode} onChange={(e) => setEnvMode(e.target.value as EnvMode)} style={{ padding: 10, borderRadius: 10, border: "1px solid #d1d5db" }}>
+              <select value={envMode} onChange={(e) => setEnvMode(e.target.value as EnvMode)} style={selectStyle}>
                 {(["Preset (Books)", "Custom"] as EnvMode[]).map((m) => (
                   <option key={m} value={m}>
                     {m}
@@ -415,7 +458,7 @@ export default function MadraCalculatorLayout() {
 
             {envMode === "Preset (Books)" ? (
               <Field label="Environment (Books)" hint={effectiveEnv.name}>
-                <select value={envId} onChange={(e) => setEnvId(e.target.value)} style={{ padding: 10, borderRadius: 10, border: "1px solid #d1d5db" }}>
+                <select value={envId} onChange={(e) => setEnvId(e.target.value)} style={selectStyle}>
                   {ENVS.map((env) => (
                     <option key={env.id} value={env.id}>
                       {env.name}
@@ -426,7 +469,15 @@ export default function MadraCalculatorLayout() {
             ) : (
               <>
                 <Field label="Aura density" hint={formatPct(customDensity)}>
-                  <input type="range" min={0} max={1} step={0.01} value={customDensity} onChange={(e) => setCustomDensity(Number(e.target.value))} />
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={customDensity}
+                    onChange={(e) => setCustomDensity(Number(e.target.value))}
+                    style={{ accentColor: "#9ca3af" }}
+                  />
                 </Field>
 
                 <div style={{ fontWeight: 650, marginTop: 6 }}>Aura composition</div>
@@ -449,6 +500,7 @@ export default function MadraCalculatorLayout() {
                           const norm = normalizeComposition(next) as Record<AuraType, number>;
                           setCustomComp(norm);
                         }}
+                        style={{ accentColor: "#9ca3af" }}
                       />
                       <div style={{ fontSize: 12, textAlign: "right", opacity: 0.8 }}>{Math.round(customComp[t] * 100)}</div>
                     </div>
@@ -457,34 +509,50 @@ export default function MadraCalculatorLayout() {
               </>
             )}
 
-            <hr style={{ border: "none", borderTop: "1px solid #e5e7eb" }} />
+            <hr style={{ border: "none", borderTop: "1px solid #1f2937" }} />
 
             <Field label="Duration (minutes)" hint={`${durationMin} min`}>
-              <input type="range" min={10} max={360} step={5} value={durationMin} onChange={(e) => setDurationMin(Number(e.target.value))} />
+              <input
+                type="range"
+                min={10}
+                max={360}
+                step={5}
+                value={durationMin}
+                onChange={(e) => setDurationMin(Number(e.target.value))}
+                style={{ accentColor: "#9ca3af" }}
+              />
             </Field>
 
             <Field label="Time step dt (minutes)" hint={`dt = ${dtMin}`}>
-              <input type="range" min={0.1} max={2} step={0.1} value={dtMin} onChange={(e) => setDtMin(Number(e.target.value))} />
+              <input
+                type="range"
+                min={0.1}
+                max={2}
+                step={0.1}
+                value={dtMin}
+                onChange={(e) => setDtMin(Number(e.target.value))}
+                style={{ accentColor: "#9ca3af" }}
+              />
             </Field>
           </div>
 
           {/* Outputs */}
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
-              <div style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 12 }}>
+              <div style={{ border: "1px solid #1f2937", borderRadius: 12, padding: 12, background: "#0b0b0b" }}>
                 <div style={{ fontSize: 12, opacity: 0.7 }}>Final reserve</div>
                 <div style={{ fontSize: 18, fontWeight: 800 }}>{format1(final.reserve)}</div>
                 <div style={{ fontSize: 12, opacity: 0.75 }}>Fullness: {formatPct(fullness)}</div>
               </div>
-              <div style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 12 }}>
-                <div style={{ fontSize: 12, opacity: 0.7 }}>Final capacity</div>
+              <div style={{ border: "1px solid #1f2937", borderRadius: 12, padding: 12, background: "#0b0b0b" }}>
+                <div style={{ fontSize: 12, opacity: 0.7 }}>Capacity</div>
                 <div style={{ fontSize: 18, fontWeight: 800 }}>{format1(final.capacity)}</div>
-                <div style={{ fontSize: 12, opacity: 0.75 }}>ΔK: {format1(final.capacity - initialCapacity)}</div>
+                <div style={{ fontSize: 12, opacity: 0.75 }}>Fixed in v0.1</div>
               </div>
-              <div style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 12 }}>
-                <div style={{ fontSize: 12, opacity: 0.7 }}>Final strain</div>
+              <div style={{ border: "1px solid #1f2937", borderRadius: 12, padding: 12, background: "#0b0b0b" }}>
+                <div style={{ fontSize: 12, opacity: 0.7 }}>Strain</div>
                 <div style={{ fontSize: 18, fontWeight: 800 }}>{format1(final.strain)}</div>
-                <div style={{ fontSize: 12, opacity: 0.75 }}>Lower is better</div>
+                <div style={{ fontSize: 12, opacity: 0.75 }}>Not modeled in v0.1</div>
               </div>
             </div>
 
@@ -492,12 +560,12 @@ export default function MadraCalculatorLayout() {
             <SimpleSparkline data={capacitySeries} label="Capacity (K) over time" />
             <SimpleSparkline data={strainSeries} label="Strain (D) over time" />
 
-            <div style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 12, fontSize: 13, opacity: 0.85, lineHeight: 1.5 }}>
+            <div style={{ border: "1px solid #1f2937", borderRadius: 12, padding: 12, fontSize: 13, opacity: 0.9, lineHeight: 1.5, background: "#0b0b0b" }}>
               <b>Notes</b>
               <ul style={{ margin: "8px 0 0 18px" }}>
-                <li>This is a layout + placeholder simulation so you can wire the UI first.</li>
-                <li>Replace <code>simulateStub()</code> with your real time-stepping rules once you study the basics.</li>
-                <li>Keep internal units arbitrary. Use percent/fullness for intuition.</li>
+                <li>Pure aura is excluded by design; only Pure madra exists.</li>
+                <li>v0.1 models reserve regeneration with saturation near capacity.</li>
+                <li>Next: add strain (D) feedback or capacity growth (K(t)), but not both at once.</li>
               </ul>
             </div>
           </div>
@@ -506,4 +574,3 @@ export default function MadraCalculatorLayout() {
     </div>
   );
 }
-
