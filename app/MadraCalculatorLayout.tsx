@@ -20,7 +20,7 @@ type AuraType =
   | "Force"
   | "Dream"
   | "Destruction"
-  | "Pure";
+  | "Death";
 
 type PathPreset = {
   id: string;
@@ -74,7 +74,7 @@ const AURA_TYPES: AuraType[] = [
   "Force",
   "Dream",
   "Destruction",
-  "Pure",
+  "Death",
 ];
 
 function clamp01(x: number) {
@@ -506,3 +506,4 @@ export default function MadraCalculatorLayout() {
     </div>
   );
 }
+
