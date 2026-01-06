@@ -1,4 +1,4 @@
-import MadraCalculatorLayout from "./MadraCalculatorLayout";
+import MadraCalculatorLayout from "./MadraCalculatorLayout.tsx";
 
 export default function Home() {
   return <MadraCalculatorLayout />;
